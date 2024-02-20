@@ -1,38 +1,21 @@
 import os
 import re
 import subprocess
-import sys
 from enum import Enum
 from typing import List
 
-
-PARENT_BRANCH = "dev"
-BASH_COLORS = {
-    "red": "31",
-    "green": "32",
-    "yellow": "33",
-    "blue": "34",
-    "white": "97",
-    "cyan": "96",
-}
-
-exclude_src_folders = [
-    "repos/starkware-public/build",
-    "build",
-    "bazel-out",
-    "src/services/starkex/docs",
-    ".*/node_modules",
-    r".*\.tox",
-    "src/third_party",
-    ".*/third_party",
-]
-
-
-def color_txt(color, txt: str, bold: bool = True):
-    bold_str = "1;" if bold else ""
-    color_code = BASH_COLORS[color.lower()]
-    lines = txt.splitlines()
-    return "\n".join(f"\033[{bold_str}{color_code}m{line}\033[0m" for line in lines)
+class Config:
+    PARENT_BRANCH = "dev"
+    EXCLUDE_SRC_FOLDERS = [
+        "repos/starkware-public/build",
+        "build",
+        "bazel-out",
+        "src/services/starkex/docs",
+        ".*/node_modules",
+        r".*\.tox",
+        "src/third_party",
+        ".*/third_party",
+    ]
 
 
 class Color(Enum):
@@ -55,78 +38,58 @@ class Color(Enum):
     WHITE = 97
 
 
-def color_print(
-    message,
-    color="",
-    bg="",
-    is_bold=False,
-    file=sys.stdout,
-    additional="",
-    use_colors=True,
-):
-    if not use_colors:
-        print(message)
-        return
-
-    if color:
-        color = color.value
-    if bg:
-        bg = str(bg.value + 10) + ";"
-    bold = ""
-    if is_bold:
-        bold = "1;"
-    if additional:
-        additional = str(additional) + ";"
-    print(f"\033[{bold}{additional}{bg}{color}m{message}\033[m", file=file)
+def exec_command(command: str, cwd=None):
+    try:
+        return subprocess.check_output(command, shell=True, cwd=cwd).decode("utf-8").splitlines()
+    except subprocess.CalledProcessError:
+        print(f"Error executing command: {command}")
+        raise
 
 
-def get_parent_branch():
-    return open(os.path.join(os.path.dirname(__file__), "parent_branch.txt")).read().strip()
+def get_parent_branch(file_location: str):
+    try:
+        with open(file_location, 'r') as file:
+            return file.read().strip()
+    except FileNotFoundError:
+        print(f"parent_branch.txt file not found at location: {file_location}")
+        raise
 
 
-def create_grep_pipe_command(extensions):
+def create_grep_pipe_command(extensions) -> str:
     if extensions is None:
-        return ""
-    return r' | { grep -E "\.(%s)$" || true; }' % ("|".join(extensions))
+        return ''
+    return r' | { grep -E "\.(%s)$" || true; }' % ('|'.join(extensions))
 
 
 def git_files(extensions=None) -> List[str]:
     return get_files("git ls-tree -r --name-only HEAD", extensions)
 
 
-def changed_files(extensions=None, with_excluded_files=False) -> List[str]:
-    return get_files(
-        f"git diff --name-only $(git merge-base origin/{get_parent_branch()} HEAD)",
-        extensions=extensions,
-        with_excluded_files=with_excluded_files,
-    )
+def changed_files(extensions=None, include_excluded_files=False) -> List[str]:
+    return get_files(f"git diff --name-only $(git merge-base origin/{Config.PARENT_BRANCH} HEAD)", extensions=extensions, include_excluded_files=include_excluded_files)
 
 
-def get_files(git_cmd: str, extensions, with_excluded_files=False, cwd=None) -> List[str]:
+def get_files(git_cmd: str, extensions=None, include_excluded_files=False, cwd=None) -> List[str]:
     if cwd is None:
         cwd = os.getcwd()
-    grep_cmd = create_grep_pipe_command(extensions)
-    command = f"{git_cmd} {grep_cmd}"  # All git files (we'll filter later)
-    files: List[str] = (
-        subprocess.check_output(command, shell=True, cwd=cwd).decode("utf-8").splitlines()
-    )
+
+    command = f"{git_cmd} {create_grep_pipe_command(extensions)}"  # All git files
+    files: List[str] = exec_command(command, cwd=cwd)
 
     # Filter out exclusion list.
-    if not with_excluded_files:
-        exclude_pattern = f'^({"|".join(exclude_src_folders)})'
+    if not include_excluded_files:
+        exclude_pattern = f'^({"|".join(Config.EXCLUDE_SRC_FOLDERS)})'
         files = [f for f in files if not re.match(exclude_pattern, f)]
 
-    # Filter to include only real files (exclude git output artifacts).
-    files = [f for f in files if os.path.exists(os.path.join(cwd, f))]
+    # Filter to include only real files.
+    files = [f for f in files if os.path.isfile(os.path.join(cwd, f))]
+
     return files
 
 
 def find_command(command_name: str) -> str:
-    """
-    Finds the path of a command by running `which`. Prints an error message upon failure.
-    """
     try:
-        return subprocess.check_output(["which", command_name]).decode("utf-8").splitlines()[0]
+        return exec_command(["which", command_name])[0]
     except subprocess.CalledProcessError:
-        print(color_txt("red", f"Failed to launch {command_name}"))
-        raise Exception(f"{command_name} not installed")
+        print(f"{command_name} not installed.")
+        raise
